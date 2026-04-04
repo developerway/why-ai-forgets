@@ -39,6 +39,12 @@ importers:
         specifier: ^0.82.0
         version: 0.82.0
 
+  examples/02-system-prompt:
+    dependencies:
+      '@anthropic-ai/sdk':
+        specifier: ^0.82.0
+        version: 0.82.0
+
 packages:
 
   '@anthropic-ai/sdk@0.82.0':
