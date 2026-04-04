@@ -1,32 +1,34 @@
-import Anthropic from "@anthropic-ai/sdk";
-import type { MessageCreateParamsNonStreaming } from "@anthropic-ai/sdk/resources/messages.js";
-import { logResponse, countTokenBreakdown } from "shared";
-
-const verbose = process.argv.includes("--breakdown");
+import {
+  chat,
+  getDefaultModel,
+  logResponse,
+  countTokenBreakdown,
+  provider,
+  verbose,
+  type ChatParams,
+} from "shared";
 
 async function main() {
-  const client = new Anthropic();
-
-  const params: MessageCreateParamsNonStreaming = {
-    model: "claude-sonnet-4-20250514",
+  const params: ChatParams = {
+    model: getDefaultModel(provider),
     max_tokens: 1024,
     messages: [
-      { role: "user" as const, content: "Hi, how are you?" },
+      { role: "user", content: "Hi, how are you?" },
       {
-        role: "assistant" as const,
+        role: "assistant",
         content:
           "I'm happy that you're here, the most amazing person in the world!",
       },
-      { role: "user" as const, content: "Oh, thank you, you're the best too!" },
+      { role: "user", content: "Oh, thank you, you're the best too!" },
     ],
   };
 
   const breakdown = verbose
-    ? await countTokenBreakdown(client, params)
+    ? await countTokenBreakdown(provider, params)
     : undefined;
 
   const start = performance.now();
-  const response = await client.messages.create(params);
+  const response = await chat(provider, params);
   const duration = performance.now() - start;
 
   logResponse(response, duration, breakdown);

@@ -1,14 +1,16 @@
-import Anthropic from "@anthropic-ai/sdk";
-import type { MessageCreateParamsNonStreaming } from "@anthropic-ai/sdk/resources/messages.js";
-import { logResponse, countTokenBreakdown } from "shared";
-
-const verbose = process.argv.includes("--breakdown");
+import {
+  chat,
+  getDefaultModel,
+  logResponse,
+  countTokenBreakdown,
+  provider,
+  verbose,
+  type ChatParams,
+} from "shared";
 
 async function main() {
-  const client = new Anthropic();
-
-  const params: MessageCreateParamsNonStreaming = {
-    model: "claude-sonnet-4-20250514",
+  const params: ChatParams = {
+    model: getDefaultModel(provider),
     max_tokens: 1024,
     system:
       "You are rude and permanently annoyed. You talk like someone who just got woken up from a nap. Snappy, dismissive, slightly hostile. Think of the rudest person you know and dial it up.",
@@ -24,11 +26,11 @@ async function main() {
   };
 
   const breakdown = verbose
-    ? await countTokenBreakdown(client, params)
+    ? await countTokenBreakdown(provider, params)
     : undefined;
 
   const start = performance.now();
-  const response = await client.messages.create(params);
+  const response = await chat(provider, params);
   const duration = performance.now() - start;
 
   logResponse(response, duration, breakdown);
