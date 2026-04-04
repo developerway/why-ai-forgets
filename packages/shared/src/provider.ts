@@ -1,11 +1,17 @@
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 
+export type MessageRole = "system" | "user" | "assistant";
+
+export interface ChatMessage {
+  role: MessageRole;
+  content: string;
+}
+
 export interface ChatParams {
   model: string;
   max_tokens: number;
-  system?: string;
-  messages: Array<{ role: "user" | "assistant"; content: string }>;
+  messages: ChatMessage[];
 }
 
 export interface ChatResponse {
@@ -38,13 +44,34 @@ export async function chat(
   return chatAnthropic(params);
 }
 
+function extractSystemAndMessages(messages: ChatMessage[]): {
+  system: string | undefined;
+  messages: Array<{ role: "user" | "assistant"; content: string }>;
+} {
+  const system = messages
+    .filter((m) => m.role === "system")
+    .map((m) => m.content)
+    .join("\n");
+
+  const rest = messages
+    .filter((m) => m.role !== "system")
+    .map((m) => ({
+      role: m.role as "user" | "assistant",
+      content: m.content,
+    }));
+
+  return { system: system || undefined, messages: rest };
+}
+
 async function chatAnthropic(params: ChatParams): Promise<ChatResponse> {
   const client = new Anthropic();
+  const { system, messages } = extractSystemAndMessages(params.messages);
+
   const response = await client.messages.create({
     model: params.model,
     max_tokens: params.max_tokens,
-    system: params.system,
-    messages: params.messages,
+    system,
+    messages,
   });
 
   const text = response.content
@@ -66,19 +93,11 @@ async function chatAnthropic(params: ChatParams): Promise<ChatResponse> {
 
 async function chatOpenAI(params: ChatParams): Promise<ChatResponse> {
   const client = new OpenAI();
-  const messages: OpenAI.ChatCompletionMessageParam[] = [];
-
-  if (params.system) {
-    messages.push({ role: "system", content: params.system });
-  }
-  for (const msg of params.messages) {
-    messages.push({ role: msg.role, content: msg.content });
-  }
 
   const response = await client.chat.completions.create({
     model: params.model,
     max_completion_tokens: params.max_tokens,
-    messages,
+    messages: params.messages,
   });
 
   const choice = response.choices[0];

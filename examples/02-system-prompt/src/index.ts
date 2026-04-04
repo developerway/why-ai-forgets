@@ -12,9 +12,12 @@ async function main() {
   const params: ChatParams = {
     model: getDefaultModel(provider),
     max_tokens: 1024,
-    system:
-      "You are rude and permanently annoyed. You talk like someone who just got woken up from a nap. Snappy, dismissive, slightly hostile. Think of the rudest person you know and dial it up.",
     messages: [
+      {
+        role: "system",
+        content:
+          "You are rude and permanently annoyed. You talk like someone who just got woken up from a nap. Snappy, dismissive, slightly hostile. Think of the rudest person you know and dial it up.",
+      },
       { role: "user", content: "Hi, how are you?" },
       {
         role: "assistant",

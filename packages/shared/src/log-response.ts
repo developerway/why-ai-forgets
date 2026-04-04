@@ -40,6 +40,12 @@ function estimateTokenCost(
   };
 }
 
+function roleToLabel(role: string): string {
+  if (role === "system") return "System prompt";
+  if (role === "assistant") return "AI response";
+  return "User message";
+}
+
 function firstNWords(s: string, n: number): string {
   const words = s.split(/\s+/).slice(0, n);
   const result = words.join(" ");
@@ -65,12 +71,11 @@ export async function countTokenBreakdown(
 
 function countTokenBreakdownOpenAI(params: ChatParams): TokenBreakdownEntry[] {
   const breakdown: TokenBreakdownEntry[] = [];
-  const { model, messages, system } = params;
 
   // tiktoken: try the exact model, fall back to gpt-4o
   let tiktokenModel: TiktokenModel;
   try {
-    tiktokenModel = model as TiktokenModel;
+    tiktokenModel = params.model as TiktokenModel;
     encoding_for_model(tiktokenModel);
   } catch {
     tiktokenModel = "gpt-4o" as TiktokenModel;
@@ -80,18 +85,9 @@ function countTokenBreakdownOpenAI(params: ChatParams): TokenBreakdownEntry[] {
   // OpenAI chat format adds ~4 tokens per message (role, delimiters)
   const perMessageOverhead = 4;
 
-  if (system) {
-    const tokens = enc.encode(system).length + perMessageOverhead;
-    breakdown.push({
-      label: "System prompt",
-      preview: firstNWords(system, 10),
-      tokens,
-    });
-  }
-
-  for (const msg of messages) {
+  for (const msg of params.messages) {
     const tokens = enc.encode(msg.content).length + perMessageOverhead;
-    const roleLabel = msg.role === "assistant" ? "AI response" : "User message";
+    const roleLabel = roleToLabel(msg.role);
     breakdown.push({
       label: roleLabel,
       preview: firstNWords(msg.content, 10),
@@ -107,7 +103,16 @@ async function countTokenBreakdownAnthropic(
   params: ChatParams,
 ): Promise<TokenBreakdownEntry[]> {
   const breakdown: TokenBreakdownEntry[] = [];
-  const { model, messages, system } = params;
+  const { model, messages } = params;
+
+  // Split system messages from conversation messages
+  const systemText = messages
+    .filter((m) => m.role === "system")
+    .map((m) => m.content)
+    .join("\n") || undefined;
+  const chatMessages = messages
+    .filter((m) => m.role !== "system")
+    .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
 
   // Baseline: minimal request to isolate overhead
   const baselineTokens = await countTokensAnthropic(model, {
@@ -116,45 +121,44 @@ async function countTokenBreakdownAnthropic(
   let running = baselineTokens;
 
   // System prompt
-  if (system) {
+  if (systemText) {
     const withSystem = await countTokensAnthropic(model, {
-      system,
+      system: systemText,
       messages: [{ role: "user", content: "." }],
     });
     const delta = withSystem - running;
     breakdown.push({
       label: "System prompt",
-      preview: firstNWords(system, 10),
+      preview: firstNWords(systemText, 10),
       tokens: delta,
     });
     running = withSystem;
   }
 
-  // First message
-  const firstMsg = messages[0];
+  // First chat message
+  const firstMsg = chatMessages[0];
   const withFirst = await countTokensAnthropic(model, {
-    system,
+    system: systemText,
     messages: [firstMsg],
   });
   breakdown.push({
-    label: "User message",
+    label: roleToLabel(firstMsg.role),
     preview: firstNWords(firstMsg.content, 10),
     tokens: withFirst - running,
   });
   running = withFirst;
 
   // Remaining messages
-  for (let i = 1; i < messages.length; i++) {
-    const slice = messages.slice(0, i + 1);
+  for (let i = 1; i < chatMessages.length; i++) {
+    const slice = chatMessages.slice(0, i + 1);
     const result = await countTokensAnthropic(model, {
-      system,
+      system: systemText,
       messages: slice,
     });
     const delta = result - running;
-    const msg = messages[i];
-    const roleLabel = msg.role === "assistant" ? "AI response" : "User message";
+    const msg = chatMessages[i];
     breakdown.push({
-      label: roleLabel,
+      label: roleToLabel(msg.role),
       preview: firstNWords(msg.content, 10),
       tokens: delta,
     });
