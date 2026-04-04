@@ -38,8 +38,20 @@ importers:
       '@anthropic-ai/sdk':
         specifier: ^0.82.0
         version: 0.82.0
+      shared:
+        specifier: workspace:*
+        version: link:../../packages/shared
 
   examples/02-system-prompt:
+    dependencies:
+      '@anthropic-ai/sdk':
+        specifier: ^0.82.0
+        version: 0.82.0
+      shared:
+        specifier: workspace:*
+        version: link:../../packages/shared
+
+  packages/shared:
     dependencies:
       '@anthropic-ai/sdk':
         specifier: ^0.82.0

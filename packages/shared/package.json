@@ -1,0 +1,11 @@
+{
+  "name": "shared",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.82.0"
+  }
+}
