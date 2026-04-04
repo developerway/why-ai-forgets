@@ -1,16 +1,13 @@
 {
   "name": "why-ai-forgets",
   "version": "1.0.0",
+  "private": true,
   "description": "",
-  "type": "module",
-  "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "ts": "tsc --noEmit",
-    "start": "tsx src/index.ts"
+    "ts": "pnpm -r ts"
   },
   "keywords": [],
   "author": "",

@@ -1,12 +1,15 @@
 # why-ai-forgets
 
-## Scripts
+## Running examples
 
 ```bash
-pnpm start          # Run the app
-pnpm build          # Compile TypeScript
-pnpm ts             # Type-check without emitting
-pnpm lint           # Run ESLint
+pnpm --filter 01-simple-script start
+```
+
+## Root scripts
+
+```bash
+pnpm lint           # Run ESLint across all examples
 pnpm format         # Format with Prettier
 pnpm format:check   # Check formatting
 ```
