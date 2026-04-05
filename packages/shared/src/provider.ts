@@ -44,7 +44,7 @@ export interface ChatWithToolsParams extends ChatParams {
 export type Provider = "anthropic" | "openai";
 
 const DEFAULT_OPENAI_MODEL = "gpt-5.4-mini";
-const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
+const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
 
 export function getDefaultModel(provider: Provider): string {
   return provider === "openai" ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL;
