@@ -258,11 +258,16 @@ async function chatWithToolsOpenAI(
     const choice = response.choices[0];
     if (choice.message.content) finalText += choice.message.content;
 
-    if (choice.finish_reason !== "tool_calls") break;
+    // No tool calls — we're done
+    if (
+      choice.finish_reason !== "tool_calls" ||
+      !choice.message.tool_calls?.length
+    )
+      break;
 
     messages.push(choice.message);
 
-    for (const tc of choice.message.tool_calls ?? []) {
+    for (const tc of choice.message.tool_calls) {
       if (tc.type !== "function") continue;
       const args = JSON.parse(tc.function.arguments);
       const result = await handler(tc.function.name, args);

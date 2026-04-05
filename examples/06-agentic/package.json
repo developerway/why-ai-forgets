@@ -1,0 +1,12 @@
+{
+  "name": "06-agentic",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file=../../.env --import=tsx src/index.ts",
+    "ts": "tsc --noEmit"
+  },
+  "dependencies": {
+    "shared": "workspace:*"
+  }
+}

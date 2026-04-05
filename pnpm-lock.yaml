@@ -57,7 +57,13 @@ importers:
         specifier: workspace:*
         version: link:../../packages/shared
 
-  examples/05-agentic:
+  examples/05-multiple-tools:
+    dependencies:
+      shared:
+        specifier: workspace:*
+        version: link:../../packages/shared
+
+  examples/06-agentic:
     dependencies:
       shared:
         specifier: workspace:*
