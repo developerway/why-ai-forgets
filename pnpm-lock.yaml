@@ -51,6 +51,18 @@ importers:
         specifier: workspace:*
         version: link:../../packages/shared
 
+  examples/04-tools:
+    dependencies:
+      shared:
+        specifier: workspace:*
+        version: link:../../packages/shared
+
+  examples/05-agentic:
+    dependencies:
+      shared:
+        specifier: workspace:*
+        version: link:../../packages/shared
+
   packages/shared:
     dependencies:
       '@anthropic-ai/sdk':

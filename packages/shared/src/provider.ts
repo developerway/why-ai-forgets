@@ -23,6 +23,22 @@ export interface ChatResponse {
   output_tokens: number;
   cache_creation_input_tokens?: number;
   cache_read_input_tokens?: number;
+  tool_calls_made?: number;
+}
+
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+}
+
+export type ToolHandler = (
+  name: string,
+  input: Record<string, unknown>,
+) => Promise<string>;
+
+export interface ChatWithToolsParams extends ChatParams {
+  tools: ToolDefinition[];
 }
 
 export type Provider = "anthropic" | "openai";
@@ -108,6 +124,165 @@ async function chatOpenAI(params: ChatParams): Promise<ChatResponse> {
     stop_reason: choice?.finish_reason ?? "unknown",
     input_tokens: response.usage?.prompt_tokens ?? 0,
     output_tokens: response.usage?.completion_tokens ?? 0,
+  };
+}
+
+export async function chatWithTools(
+  provider: Provider,
+  params: ChatWithToolsParams,
+  handler: ToolHandler,
+): Promise<ChatResponse> {
+  if (provider === "openai") {
+    return chatWithToolsOpenAI(params, handler);
+  }
+  return chatWithToolsAnthropic(params, handler);
+}
+
+async function chatWithToolsAnthropic(
+  params: ChatWithToolsParams,
+  handler: ToolHandler,
+): Promise<ChatResponse> {
+  const client = new Anthropic();
+  const { system, messages: initialMsgs } = extractSystemAndMessages(
+    params.messages,
+  );
+
+  const tools = params.tools.map((t) => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.input_schema as Anthropic.Messages.Tool.InputSchema,
+  }));
+
+  const messages: Anthropic.Messages.MessageParam[] = [...initialMsgs];
+  let totalInput = 0;
+  let totalOutput = 0;
+  let toolCallsMade = 0;
+  let finalText = "";
+  let lastResponse!: Anthropic.Messages.Message;
+
+  while (true) {
+    const response = await client.messages.create({
+      model: params.model,
+      max_tokens: params.max_tokens,
+      system,
+      tools,
+      messages,
+    });
+
+    totalInput += response.usage.input_tokens;
+    totalOutput += response.usage.output_tokens;
+    lastResponse = response;
+
+    const textBlocks = response.content
+      .filter((b): b is Anthropic.Messages.TextBlock => b.type === "text")
+      .map((b) => b.text);
+    if (textBlocks.length > 0) finalText += textBlocks.join("\n");
+
+    if (response.stop_reason !== "tool_use") break;
+
+    const toolUses = response.content.filter(
+      (b): b is Anthropic.Messages.ToolUseBlock => b.type === "tool_use",
+    );
+
+    messages.push({ role: "assistant", content: response.content });
+
+    const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
+    for (const tu of toolUses) {
+      const result = await handler(
+        tu.name,
+        tu.input as Record<string, unknown>,
+      );
+      toolResults.push({
+        type: "tool_result",
+        tool_use_id: tu.id,
+        content: result,
+      });
+      toolCallsMade++;
+    }
+
+    messages.push({ role: "user", content: toolResults });
+  }
+
+  return {
+    text: finalText,
+    model: lastResponse.model,
+    provider: "anthropic",
+    stop_reason: lastResponse.stop_reason ?? "unknown",
+    input_tokens: totalInput,
+    output_tokens: totalOutput,
+    tool_calls_made: toolCallsMade,
+  };
+}
+
+async function chatWithToolsOpenAI(
+  params: ChatWithToolsParams,
+  handler: ToolHandler,
+): Promise<ChatResponse> {
+  const client = new OpenAI();
+
+  const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = params.tools.map(
+    (t) => ({
+      type: "function" as const,
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: t.input_schema,
+      },
+    }),
+  );
+
+  const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] =
+    params.messages.map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+
+  let totalInput = 0;
+  let totalOutput = 0;
+  let toolCallsMade = 0;
+  let finalText = "";
+  let lastResponse!: OpenAI.Chat.Completions.ChatCompletion;
+
+  while (true) {
+    const response = await client.chat.completions.create({
+      model: params.model,
+      max_completion_tokens: params.max_tokens,
+      tools,
+      messages,
+    });
+
+    totalInput += response.usage?.prompt_tokens ?? 0;
+    totalOutput += response.usage?.completion_tokens ?? 0;
+    lastResponse = response;
+
+    const choice = response.choices[0];
+    if (choice.message.content) finalText += choice.message.content;
+
+    if (choice.finish_reason !== "tool_calls") break;
+
+    messages.push(choice.message);
+
+    for (const tc of choice.message.tool_calls ?? []) {
+      if (tc.type !== "function") continue;
+      const args = JSON.parse(tc.function.arguments);
+      const result = await handler(tc.function.name, args);
+      messages.push({
+        role: "tool",
+        tool_call_id: tc.id,
+        content: result,
+      });
+      toolCallsMade++;
+    }
+  }
+
+  return {
+    text: finalText,
+    model: lastResponse.model,
+    provider: "openai",
+    stop_reason: lastResponse.choices[0]?.finish_reason ?? "unknown",
+    input_tokens: totalInput,
+    output_tokens: totalOutput,
+    tool_calls_made: toolCallsMade,
   };
 }
 

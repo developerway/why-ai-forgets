@@ -1,0 +1,1265 @@
+---
+author: nadia
+date: 21-10-2025
+description: 'A data-driven comparison of CSR, SSR, and RSC under the same app and test setup, focusing on initial-load performance and the impact of client- vs server-side data fetching (including Streaming + Suspense).'
+image: /assets/react-server-components-performance/welcome.png
+imageLarge: /assets/react-server-components-performance/welcome-large.png
+title: 'React Server Components: Do They Really Improve Performance?'
+tags: react, performance
+rec1: '30:reconciliation-in-react.mdx'
+rec2: '16:components-composition-how-to-get-it-right.mdx'
+---
+
+Have you heard of [React Server Components](https://react.dev/reference/rsc/server-components)? You probably have. It's everything anyone talks about in the React community in the last few years. It's also the most misunderstood concept I feel.
+
+To be totally honest with you, I didn't get their point for a while either. It's way too conceptual for my practical mind. Plus, we could fetch data on the server with Next.js and APIs like [getServerSideProps](https://nextjs.org/docs/pages/building-your-application/data-fetching/get-server-side-props) waaay before any Server Components were introduced. So what's the difference?
+
+Only when I compared how all those patterns differ from an implementation point of view, how data is fetched across different rendering techniques, and when I traced the performance impact of each of them in different variations, it finally clicked.
+
+So this is exactly what this article does. It looks into how Client-Side Rendering, Server-Side Rendering, and React Server Components are implemented, how JavaScript and data travel through the network for each of them, and the performance implications of migrating from CSR (Client-Side Rendering) to SSR (Server-Side Rendering) to RSC (React Server Components).
+
+I implemented a semi-real multi-page app to measure all of this, so this will be fun! It's available on GitHub in case you want to replicate the experiments yourself.
+
+I'm going to assume you've at least heard of Initial Load, Client-Side Rendering, Server-Side Rendering, the Chrome Performance tab, and how to read it. If you need a refresher, I have a few articles I recommend reading first, in this order:
+
+1. [Initial load performance for React developers: investigative deep dive](https://www.developerway.com/posts/initial-load-performance)
+2. [Client-Side Rendering in Flame Graphs](https://www.developerway.com/posts/client-side-rendering-flame-graph)
+3. [SSR Deep Dive for React Developers](https://www.developerway.com/posts/ssr-deep-dive-for-react-developers)
+
+## Introducing the Project To Measure
+
+Let's say I want to implement an interactive and beautiful website. One of the pages on that website looks like this:
+
+![](/assets/react-server-components-performance/inbox-full.png)
+
+Some data on that page is dynamic and is fetched via REST endpoints. Namely, items in the Sidebar on the left are fetched via the `/api/sidebar` endpoint, and the list of messages on the right is fetched via the `/api/messages` endpoint.
+
+The `/api/sidebar` endpoint is quite fast, taking **100ms** to execute. The `/api/messages` endpoint, however, takes **1s**: someone forgot to optimize the backend here. Those numbers are somewhat realistic for projects on the older and larger side, I'd say.
+
+If you want to follow along with the article and verify the measurements on your own, the project is [available on GitHub](https://github.com/developerway/react-server-components). Clone the repo, install the dependencies, and follow the "how to reproduce" steps at the end of each section.
+
+## Defining What We Are Measuring
+
+When it comes to performance, there are a million and one things you can be measuring. It's impossible to say "this website has good or bad performance" without defining what exactly we mean by "performance", "good", and "bad".
+
+For this particular experiment, I want to see the difference in _loading performance_ between different rendering and data fetching techniques, including React Server Components. For the purpose of understanding them all, and also answering the question: "React Server Components: are they worth it from a performance perspective?"
+
+I'm going to use the **Performance** tab of Chrome DevTools for measurements. With **CPU 6x slowdown** and **Network: Slow 4G**. In case you're not particularly familiar with some of them, I did an overview of the parts we're going to use today in the [Initial load performance for React developers: investigative deep dive](https://www.developerway.com/posts/initial-load-performance) article.
+
+I'm interested in both first-time visitors, when JavaScript is downloaded for the first time, and in repeated visitors, when JavaScript is usually served from the browser cache.
+
+I'm going to measure:
+
+1. **[Largest Contentful Paint](https://developer.mozilla.org/en-US/docs/Glossary/Largest_contentful_paint) (LCP) value**, which happens to correspond to the time the user sees the page rendered with "skeletons" for the sidebar and messages.
+2. **"Sidebar items visible"** time, which is pretty self-explanatory: when the sidebar items are fetched from the endpoint and rendered on the page.
+3. **"Messages visible"** time, same as above, only for the messages.
+4. **"Page interactive"** time, the time when the toggle in the header starts working (you'll see the importance of this one later).
+
+![](/assets/react-server-components-performance/measurements.png)
+
+I'll take each measurement a few times and use the median to eliminate outliers.
+
+And lastly, I'm going to hit the HTTP/1 limits on concurrent connections pretty soon. All the local Node-based servers are HTTP/1 by default, including Next.js. In Chrome, [this limit is just 6](https://medium.com/@hnasr/chromes-6-tcp-connections-limit-c199fe550af6)! In the HTTP/1 world, if I try to download more than six resources (i.e., JavaScript files in my case) from the same domain at the same time, they will "queue" according to the limit.
+
+![](/assets/react-server-components-performance/http1-vs-http2.png)
+
+In production, however, those files will likely be served via a CDN, and all of them are HTTP/2 or HTTP/3 these days. In this case, all the JavaScript files will be downloaded in parallel. So when testing locally, I want to imitate the CDN behavior for consistency. I did this via a reverse proxy with [Caddy](https://caddyserver.com/docs/), but any similar tool would do.
+
+Okay, now that we're all set up, let's start playing with code.
+
+## Measuring Client-Side Rendering
+
+First, let's measure how Client-Side Rendering performs. Depending on the year you were born, Client-Side Rendering might be your default React or even default Web experience. If you're on old Webpack, or Vite + any router, and haven't implemented SSR (Server-Side Rendering) explicitly, you're on CSR (Client-Side Rendering).
+
+From an implementation point of view, it means that when your browser requests the `/inbox` URL, the server responds with the HTML that looks like this:
+
+```tsx
+<!doctype html>
+<html lang="en">
+  <head>
+    <script type="module" src="/assets/index-C3kWgjO3.js"></script>
+		<link rel="stylesheet" href="/assets/index-C26Og_lN.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
+```
+
+You'll have `script` and `link` elements in the `head` tag and the empty `div` in the `body`. That's it. If you disable JavaScript in your browser, you'll see an empty page, as you'd expect from an empty div.
+
+To transform this empty `div` into a beautiful page, the browser needs to download and execute the JavaScript file(s). The file(s) will contain everything you write as a React developer:
+
+```tsx
+// That's the entry point to the beautiful app
+export default function App() {
+  return (
+    <SomeLayout>
+      <Sidebar />
+      <MainContent />
+    </SomeLayout>
+  );
+}
+```
+
+Plus something like this:
+
+```tsx
+// this is made up API for simplicity
+const DOMElements = renderToDOM(<App />);
+const root = document.getElementById('root');
+root.appendChild(DOMElements);
+```
+
+React itself transforms the entry-point `App` component into DOM nodes. Then it finds that empty div by its `id`. And injects the generated elements into the empty div.
+
+The entire interface is suddenly visible.
+
+If you record Performance for the Initial Load, the picture will be something like this:
+
+![](/assets/react-server-components-performance/client-side-rendering-schema.png)
+
+While the JavaScript is downloading, the user still stares at the empty screen. Only after everything is downloaded AND JavaScript is compiled and executed by the browser does the UI become visible, the LCP metric is recorded, and side effects like fetch requests are triggered.
+
+In real life, it will be much messier, of course. There will be multiple JavaScript files, sometimes chained, CSS files, a bunch of other stuff happening in the Main section, etc. If you record the actual profile of this project, it should look like this:
+
+![](/assets/react-server-components-performance/client-side-rendering-real.png)
+
+Data fetching for the sidebar and message items is triggered inside JavaScript:
+
+```tsx
+useEffect(() => {
+  const fetchMessages = async () => {
+    const response = await fetch('/api/messages');
+    const data = await response.json();
+  };
+
+  fetchMessages();
+}, []);
+```
+
+It could be any data-fetching framework, like [Tanstack Query](https://tanstack.com/query/latest), for example. In this case, the code will look like this:
+
+```tsx
+const { isPending, error, data } = useQuery({
+  queryKey: ['messages'],
+  queryFn: () =>
+    fetch('/api/messages').then((res) => res.json()),
+});
+```
+
+But it doesn't really matter. What's important here is that for the data fetching process to trigger, JavaScript needs to be downloaded, compiled, and executed.
+
+The Initial Load numbers with no JavaScript cached look like this:
+
+<div className="scrollable-container">
+<table border="1" cellpadding="5" cellspacing="0">
+  <thead>
+  <tr>
+    <th></th>
+    <th>LCP (no cache)</th>
+    <th>Sidebar (no cache)</th>
+    <th>Messages (no cache)</th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td>Client-Side Rendering</td>
+    <td>4.1s</td>
+    <td>4.7s</td>
+    <td>5.1s</td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+4.1 seconds wait to see _anything_ on the screen! Whoever thought it was a good idea to render anything on the client??
+
+Aside from everything related to dev experience and learning curve (which are huge deals by themselves), there are two main benefits compared to more "traditional" websites.
+
+First, performance actually! Transitions between pages when everything is on the client and there is no back-and-forth with the server can be incredibly fast. In the case of this project, navigating from the Inbox page to Settings takes just **80ms**. It's as close to instantaneous as it can get.
+
+And second, it's cheap. Ridiculously cheap. You can implement a really complicated, highly interactive, rich experience, upload it to something like Cloudflare CDN, have millions of monthly users, and still stay on the free plan. It's perfect for hobby projects, student projects, or anything with a large potential audience where money is a significant factor.
+
+Plus, no servers, no maintenance, no CPU or memory monitoring, no scalability issues as a nice bonus. What's not to love?
+
+Also, those > 4-second loading times are not as terrible as they look. It only happens the very first time the user visits your app. Granted, in something like a landing page, that's unacceptable. But for SaaS, where you'd expect users to visit the website often, the 4 seconds will happen only once (per deploy). Then the JavaScript is downloaded and cached by the browser, and the second and following load numbers will be significantly reduced.
+
+<div className="scrollable-container">
+<table border="1" cellpadding="5" cellspacing="0">
+  <thead>
+  <tr>
+    <th></th>
+    <th>LCP (no cache)</th>
+    <th>Sidebar (no cache)</th>
+    <th>Messages (no cache)</th>
+    <th>LCP (JS cached)</th>
+    <th>Sidebar (JS cached)</th>
+    <th>Messages (JS cached)</th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td>Client-Side Rendering</td>
+    <td>4.1s</td>
+    <td>4.7s</td>
+    <td>5.1s</td>
+    <td>800ms</td>
+    <td>1.5s</td>
+    <td>2s</td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+800ms is much better, isn't it?
+
+The final number I'm interested in today is when the Toggle becomes interactive. In this case, since everything shows up only when JavaScript is executed, it will match the LCP time. So the full table will look like this:
+
+<div className="scrollable-container">
+<table border="1" cellpadding="5" cellspacing="0">
+  <thead>
+  <tr>
+    <th></th>
+    <th>LCP (no cache/JS cache)</th>
+    <th>Sidebar (no cache/JS cache)</th>
+    <th>Messages (no cache/JS cache)</th>
+    <th>Toggle interactive (no cache/JS cache)</th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td>Client-Side Rendering</td>
+    <td>4.1s / 800ms</td>
+    <td>4.7s / 1.5s</td>
+    <td>5.1s / 2s</td>
+    <td>4.1s / 800ms</td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+**Steps to reproduce the experiment**:
+
+1. Clone the [repo](https://github.com/developerway/react-server-components), install all dependencies with `npm install`.
+2. Start the backend API: `npm run start --workspace=backend-api`
+3. Build the frontend: `npm run build --workspace=client-fetch-frontend`
+4. Start the frontend: `npm run start --workspace=client-fetch-frontend`
+5. Start reverse proxy for HTTP/2: `caddy reverse-proxy --to :3000`
+6. Open the website at https://localhost/inbox
+7. Measure!
+
+## Measuring Server-Side Rendering (No Data Fetching)
+
+The fact that we have to stare at the blank page for so long started to annoy people at some point. Even if it was for the first time only. Plus, for SEO purposes, it wasn't the best solution. Plus, the internet was slower, and the devices were not the latest MacBooks.
+
+So people started scratching their heads to come up with a solution. While still staying within the React world, which was just way too convenient to give up.
+
+We know that the entire React app at the very end looks like this:
+
+```tsx
+// this is a made-up API for simplicity
+const DOMElements = renderToDOM(<App />);
+```
+
+But what if instead of DOM nodes, React could produce the HTML of the app instead?
+
+```tsx
+const HTMLString = renderToString(<App />);
+```
+
+Like the actual string that the server can then send to the browser instead of the empty div?
+
+```tsx
+// HTMLString then would contain this string:
+<div class="...">
+  <div class="...">...</div>
+  ...
+</div>
+```
+
+In theory, our extremely simple server for Client-Side Rendering:
+
+```tsx
+// Yep, this is basically all we need for Client-Side Rendering
+export const serveStatic = async (c) => {
+  const html = fs.readFileSync('index.html').toString();
+
+  return c.body(html, 200);
+};
+```
+
+Can continue to be just as simple. It just needs one additional step: find-and-replace a string in the `html` variable.
+
+```tsx
+// Same server with SSR
+export const serveStatic = async (c) => {
+  const html = fs.readFileSync('index.html').toString(); // Extract HTML string
+  const HTMLString = renderToString(<App />);
+  // And inject it into the server response
+  const htmlWithSSR = html.replace(
+    '<div id="root"></div>',
+    HTMLString,
+  );
+
+  return c.body(htmlWithSSR, 200);
+};
+```
+
+Now the entire UI is visible right at the beginning without waiting for any JavaScript.
+
+Welcome to the Server-Side Rendering (SSR) and Static-Site Generation (SSG) era of React. Because [renderToString](https://react.dev/reference/react-dom/server/renderToString) is actually a real API supported by React. This is literally the core implementation behind some React SSG/SSR frameworks.
+
+If I do exactly this for my Client-Side Rendered project, it will be a Server-Side Rendered project. The performance profile will shift slightly. The LCP number will move to the left, right after the HTML and CSS are downloaded, since the entire HTML is sent in the initial server response, and everything is visible right away.
+
+![](/assets/react-server-components-performance/server-side-rendering.png)
+
+A few important things here.
+
+First, as you can see, the LCP number (when the page "Skeleton" is visible) should drastically improve (we'll measure it in a bit).
+
+However, we still need to download, compile, and execute the same JavaScript in exactly the same way. Because the page is supposed to be interactive, i.e., all those dropdowns, filters, and sorting algorithms we implemented should work. And while we wait, the entire page is already visible!
+
+That gap between the page being already visible, but we're still waiting for JavaScript download to make it interactive, is the time when the page will appear **_broken_** for users. This is why I wanted to measure the "page becomes interactive" time. Because during that time, the nice Toggle in the header won't work.
+
+Also, only the LCP mark has moved in that picture. The "Sidebar items" and "Messages" are in exactly the same places, structurally speaking. This is because we haven't changed the code a bit and are still fetching that data on the client! Somewhere deep in the React code, we still have something like this:
+
+```tsx
+const Sidebar = () => {
+  useEffect(() => {
+    const fetchSidebarData = async () => {
+      const response = await fetch('/api/sidebar');
+      const data = await response.json();
+      setSidebarData(data);
+    };
+
+    fetchSidebarData();
+  }, []);
+};
+```
+
+`useEffect` is an asynchronous side-effect. It will be triggered only when the app is properly mounted in the browser. Which will happen only when the browser downloads and processes JavaScript, and client-side React kicks in. `renderToString` will just skip it as irrelevant.
+
+As a result, the fact that we have the page pre-rendered on the server has exactly zero effect on the time when the Sidebar items or table data show up!
+
+If I finally measure what's happening instead of theoretical discussions, I'll see these numbers:
+
+<div className="scrollable-container">
+<table border="1" cellpadding="5" cellspacing="0">
+  <thead>
+  <tr>
+    <th></th>
+    <th>LCP (no cache/JS cache)</th>
+    <th>Sidebar (no cache/JS cache)</th>
+    <th>Messages (no cache/JS cache)</th>
+    <th>Toggle interactive (no cache/JS cache)</th>
+    <th>No interactivity gap</th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td>Client-Side Rendering</td>
+    <td>4.1s / 800ms</td>
+    <td>4.7s / 1.5s</td>
+    <td>5.1s / 2s</td>
+    <td>4.1s / 800ms</td>
+    <td></td>
+  </tr>
+  <tr className="active">
+    <td>Server-Side Rendering (Client Data Fetching)</td>
+    <td><b>1.61s</b> / 800ms</td>
+    <td>4.7s / 1.5s</td>
+    <td>5.1s / 2s</td>
+    <td>4s / 900ms</td>
+    <td>2.39s / 100ms</td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+As you can see, the LCP value on initial load indeed radically dropped: from **4.1s to 1.61s**! Exactly as in the theoretical schematic.
+
+However, the time when the Toggle became interactive remained the same, exactly as in the schematics. So the experience is almost **broken for more than 2 seconds** on initial load!
+
+That "no interactivity" gap, along with the cost of running a server, is the price you'll pay for LCP improvements when transitioning from Client-Side Rendering to Server-Side Rendering. There is no way to get rid of it. We can only minimize it by reducing the amount of JavaScript users have to download during the first run.
+
+**Steps to reproduce the experiment**:
+
+1. Exactly the same steps as for Client-Side Rendering, plus:
+2. Go to `src/frontend/client-fetch/server/index.ts` and uncomment `return c.html(simpleSSR(c, html));` line.
+
+## Measuring Server-Side Rendering (With Data Fetching)
+
+"No interactivity" gap aside, there is another somewhat problematic area in the previous experiment. The fact that there were no changes in the Sidebar and Messages appearances. But since we're in the server realm already, why can't we extract that data here? It surely will be faster. At the very least, latency and bandwidth will likely be much better.
+
+The answer: we absolutely can! It would require much more work implementation-wise, though, compared to the simple pre-rendering we did. First, the server. We need to fetch that data there:
+
+```tsx
+// Add data fetching to the SSR server
+export const serveStatic = async (c) => {
+  const html = fs.readFileSync("index.html").toString();
+ 
+  // Data fetching logic
+  const sidebarPromise = fetch(`/api/sidebar`).then((res) => res.json());
+	const messagesPromise = fetch(`/api/messages`).then((res) => res.json());
+
+	const [sidebar, messages] = await Promise.all([
+	  sidebarPromise,
+	  messagesPromise,
+	]);
+
+	... // the rest is the same
+};
+
+```
+
+Then we need to pass that data to React somehow so it can render the items when the rest of the UI is rendered. Luckily, since essentially the `App` component is nothing more than a function, it accepts arguments like any other JavaScript function. We know them as props. Yep, we need to pass good old props to the `App` when we're doing `renderToString`!
+
+```tsx
+// Add data fetching to the SSR server
+export const serveStatic = async (c) => {
+  const html = fs.readFileSync('index.html').toString(); // Data fetching logic
+  const sidebarPromise = fetch(`/api/sidebar`).then((res) =>
+    res.json(),
+  );
+  const messagesPromise = fetch(`/api/messages`).then(
+    (res) => res.json(),
+  );
+
+  const [sidebar, messages] = await Promise.all([
+    sidebarPromise,
+    messagesPromise,
+  ]);
+
+  // Pass fetched data as props
+  const HTMLString = renderToString(
+    <App messages={messages} sidebar={sidebar} />,
+  );
+};
+```
+
+Then our `App` component needs to be modified to accept props and pass them around with the regular prop drilling technique:
+
+```tsx
+// That's the entry point to the beautiful app
+export default function App({ sidebar, messages }) {
+  return (
+    <SomeLayout>
+      <Sidebar data={sidebar} />
+      <MainContent data={messages} />
+    </SomeLayout>
+  );
+}
+```
+
+In theory, this could already work. In practice, we need to handle a few more things here. First, "hydration". In SSR land, the "hydration" refers to React reusing the existing HTML sent from the server to attach event listeners.
+
+For hydration to work properly, the HTML coming from the server should be _exactly the same_ as on the client. Which is impossible, since the client doesn't have that fetched data yet. Only the server does. Which means we need to pass the data from the server to the client somehow at the same time we send the HTML so it's available during React initialization.
+
+The easiest way to do that is to embed it into the HTML as a script tag and attach it as an object to `window`:
+
+```tsx
+const htmlWithData = `
+	<script>window.__SSR_DATA__ = ${JSON.stringify({
+    sidebar,
+    messages,
+  })}</script>
+	${HTMLString}`;
+```
+
+Now on the frontend, it will be available as `window.__SSR_DATA__.sidebar` that we can read and pass around:
+
+```tsx
+export default function App({ messages, sidebar }) {
+  // props will be here when we pass them manually with renderToString
+  const sidebarData =
+    typeof window === 'undefined'
+      ? sidebar
+      : window.__SSR_DATA__?.sidebar;
+  const messagesData =
+    typeof window === 'undefined'
+      ? messages
+      : window.__SSR_DATA__?.messages;
+
+  return (
+    <SomeLayout>
+      <Sidebar data={sidebarData} />
+      <MainContent data={messagesData} />
+    </SomeLayout>
+  );
+}
+```
+
+And this actually works! The performance structure will change again:
+
+![](/assets/react-server-components-performance/server-side-rendering-with-data.png)
+
+Now the entire page, including previously dynamic items, will be visible as soon as CSS finishes downloading. Then we'll still have to wait for the exact same JavaScript as before, and only after that will the page become interactive.
+
+The numbers now look like this:
+
+<div className="scrollable-container">
+<table border="1" cellpadding="5" cellspacing="0">
+  <thead>
+  <tr>
+    <th></th>
+    <th>LCP (no cache/JS cache)</th>
+    <th>Sidebar (no cache/JS cache)</th>
+    <th>Messages (no cache/JS cache)</th>
+    <th>Toggle interactive (no cache/JS cache)</th>
+    <th>No interactivity gap</th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td>Client-Side Rendering</td>
+    <td>4.1s / 800ms</td>
+    <td>4.7s / 1.5s</td>
+    <td>5.1s / 2s</td>
+    <td>4.1s / 800ms</td>
+    <td></td>
+  </tr>
+  <tr>
+    <td>Server-Side Rendering (Client Data Fetching)</td>
+    <td>1.61s / 800ms</td>
+    <td>4.7s / 1.5s</td>
+    <td>5.1s / 2s</td>
+    <td>4s / 900ms</td>
+    <td>2.39s / 100ms</td>
+  </tr>
+  <tr className="active">
+    <td>Server-Side Rendering (Server Data Fetching)</td>
+    <td>2.16s / 1.24s</td>
+    <td>2.16s / 1.24s</td>
+    <td>2.16s / 1.24s</td>
+    <td>4.6s / 1.4s</td>
+    <td>2.44s / 150ms</td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+The LCP value, unfortunately, degraded. This is no surprise. It's because we now have to wait for data-fetching promises to resolve themselves before we can proceed with pre-rendering of the React part.
+
+```tsx
+// Add data fetching to the SSR server
+export const serveStatic = async (c) => {
+ 
+  const sidebarPromise = fetch(`/api/sidebar`).then((res) => res.json());
+	const statisticsPromise = fetch(`/api/statistics`).then((res) => res.json());
+
+	// we're waiting for both requests
+	const [sidebar, statistics] = await Promise.all([
+	  sidebarPromise,
+	  statisticsPromise,
+	]);
+
+	... // the rest of the server code
+};
+
+```
+
+And we really must wait for them since we need that data to start rendering anything.
+
+Sidebar and Messages items, however, appear much faster now: **2.16 seconds instead of 5.1 seconds**. So it could be called an improvement if the LCP number is not that important to you compared to the full-page view. Or, we could prefetch only the Sidebar, by the way, with minimal regression (this endpoint is pretty fast), and keep the Messages part on the client. That will be a product decision based on your understanding of what's best for the users.
+
+**Steps to reproduce the experiment**:
+
+1. Exactly the same steps as for Client-Side Rendering, plus:
+2. Go to `src/frontend/client-fetch/server/index.ts` and uncomment `simpleSSRWithHydration(c, html)` line.
+
+## Measuring Next.js Pages ("Old" Next.js)
+
+In reality, the code in the previous section is, of course, going to be much more complicated. First, it's a multi-page application. Most pages won't need the list of messages. Plus, we'd need to pre-render each page individually: showing HTML for the main page when the user loads the `/login` URL wouldn't make much sense.
+
+So we need to introduce some form of routing on the server now. And at the very least create different entry points for each page.
+
+Basically, we started inventing our own SSR framework. So there is no harm in switching to something existing now. For example, let's use Next.js Pages Router, the "old" Next.js experience. The one without React Server Components. We'll transition to the version with Server Components in the next section.
+
+To migrate my custom SSR implementation to the Next.js Pages Router, I just need to move the fetching logic into [getServerSideProps](https://nextjs.org/docs/pages/building-your-application/data-fetching/get-server-side-props). Which is the old Next.js API to fetch page data on the server. Everything else, including props drilling, stays the same! Next.js just abstracts away the `renderToString` call and the find-and-replace logic that we did for the manual implementation.
+
+This is how the code will look now if I want to fetch the data on the server:
+
+```tsx
+export const getServerSideProps = async () => {
+  const sidebarPromise = fetch(`/api/sidebar`).then((res) =>
+    res.json(),
+  );
+  const messagesPromise = fetch(`/api/messages`).then(
+    (res) => res.json(),
+  );
+
+  const [sidebar, messages] = await Promise.all([
+    sidebarPromise,
+    messagesPromise,
+  ]);
+
+  // Pass data to the page via props
+  return { props: { messages, sidebar } };
+};
+```
+
+Or I can just comment it out to keep client-side data fetching.
+
+Everything else stays the same, including the performance profile. It should maintain the same structure as the SSR sections above, with and without data fetching.
+
+Recording, writing down, and here's the result:
+
+<div className="scrollable-container">
+<table border="1" cellpadding="5" cellspacing="0">
+  <thead>
+  <tr>
+    <th></th>
+    <th>LCP (no cache/JS cache)</th>
+    <th>Sidebar (no cache/JS cache)</th>
+    <th>Messages (no cache/JS cache)</th>
+    <th>Toggle interactive (no cache/JS cache)</th>
+    <th>No interactivity gap</th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td>Client-Side Rendering</td>
+    <td>4.1s / 800ms</td>
+    <td>4.7s / 1.5s</td>
+    <td>5.1s / 2s</td>
+    <td>4.1s / 800ms</td>
+    <td></td>
+  </tr>
+  <tr>
+    <td>Server-Side Rendering (Client Data Fetching)</td>
+    <td>1.61s / 800ms</td>
+    <td>4.7s / 1.5s</td>
+    <td>5.1s / 2s</td>
+    <td>4s / 900ms</td>
+    <td>2.39s / 100ms</td>
+  </tr>
+  <tr className="secondary">
+    <td>Server-Side Rendering (Server Data Fetching)</td>
+    <td>2.16s / 1.24s</td>
+    <td>2.16s / 1.24s</td>
+    <td>2.16s / 1.24s</td>
+    <td>4.6s / 1.4s</td>
+    <td>2.44s / 150ms</td>
+  </tr>
+  <tr>
+    <td>Next.js Pages (Client Data fetching)</td>
+    <td>1.76s / 800ms</td>
+    <td>3.7s / 1.5s</td>
+    <td>4.2s / 2s</td>
+    <td>3.1s / 900ms</td>
+    <td>1.34s / 100ms</td>
+  </tr>
+  <tr className="active">
+    <td>Next.js Pages (Server Data fetching)</td>
+    <td>2.15s / 1.15s</td>
+    <td>2.15s / 1.15s</td>
+    <td>2.15s / 1.15s</td>
+    <td>3.5s / 1.25s</td>
+    <td>1.35s / 100ms</td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+As you can see, the LCP value for initial load is even slightly _worse_ than my custom implementation for the "Server Data Fetching" use case. Sidebar and Messages, on the other hand, show up a second earlier in this use case. In the "Server Data Fetching" use case, the LCP/Sidebar/Messages numbers are identical between my custom solution and Next.js. But the "no interactivity" gap is a full second shorter in Next.js.
+
+This is a very visible use case of what will happen when code splitting is performed differently. Next.js splits JavaScript into many more chunks than my custom solution. As a result, when I measure initial load, many more parallel JavaScript files "steal" a bit of bandwidth from the CSS, resulting in the CSS download taking longer and the LCP value slightly degrading.
+
+On the other hand, having many JavaScript files in parallel take a second faster to download overall, resulting in a much better time when the page becomes interactive, and, as a result, a much shorter "no interactivity" gap.
+
+**Steps to reproduce the experiment**:
+
+1. Clone the [repo](https://github.com/developerway/react-server-components), install all dependencies with `npm install`.
+2. Start the backend API: `npm run start --workspace=backend-api`
+3. Go to `frontend/utils/link.tsx`, uncomment Next.js link and comment out the custom implementation
+4. Go to `src/frontend/next-pages/pages/inbox.tsx` and comment/uncomment `getServerSideProps` for toggling between data fetching use cases
+5. Build the frontend: `npm run build --workspace=next-pages`
+6. Start the frontend: `npm run start --workspace=next-pages`
+7. Start reverse proxy for HTTP2/3: `caddy reverse-proxy --to :3000`
+8. Open the website at https://localhost/inbox
+
+## Introducing React Server Components
+
+Okay, so to recap the previous section: fetching and pre-rendering on the server can be really good for the initial load performance numbers. There are, however, a few issues with it still.
+
+The biggest issue with SSR is the "no interactivity" gap: when the page is already visible but the JavaScript is still downloading/initializing. The only way to shorten it is to reduce the amount of JavaScript necessary for interactivity. We already did some code splitting when we migrated to Next.js Pages and saw a whole second improvement in this area. Can we do more here, besides code splitting? Do we even need all that JavaScript?
+
+The second issue with SSR is data fetching. Currently, if I want to pre-fetch messages on the server, thus reducing the wait time for messages to appear, it will negatively affect both the initial load and the time when the sidebar items show up.
+
+This is due to the fact that server rendering is currently a synchronous process. We wait for all the data first, then pass that data to `renderToString`, then send the result to the client.
+
+![](/assets/react-server-components-performance/current-ssr-structure.png)
+
+But what if our server could be smarter? Those fetch requests are promises, async functions. Technically, we don't _need_ to wait for them to start doing something else. What if we could:
+
+1. Trigger those fetch promises without waiting for them.
+2. Start rendering React stuff that doesn't need that data, and if it's ready, send it to the client immediately.
+3. When the Sidebar promise is resolved and its data is available, render the Sidebar portion, inject it into the server page, and send it to the client.
+4. Do the same for the Messages.
+
+Basically, replicate the exact same structure of data fetching that we have in Client-Side Rendering, but _on the server_.
+
+![](/assets/react-server-components-performance/server-components-structure.png)
+
+In theory, if this is possible, it could be crazy fast. We'd be able to serve the initial rendered page with placeholders at the speed of the simplest SSR, and still be able to see Sidebar and Messages items way _before_ any JavaScript is downloaded and executed.
+
+React would need to abandon the simple synchronous `renderToString` for this, rewrite the rendering process to be in chunks, make those chunks injectable into the rendered structure somehow, and be able to serve those chunks independently to the client.
+
+That's quite a task! And it's done already, since it describes the combination of React Server Components and Streaming working in harmony.
+
+To understand how all of this fits and works together, we need to understand three main concepts.
+
+### React Server Components
+
+First of all, the React Server Components themselves.
+
+A typical React component quite often just lays out HTML tags on a page. For example, the Sidebar component in this project looks like this:
+
+```tsx
+export const TopbarForSidebarContentLayout = () => {
+  return (
+    <div className="lg:bg-blinkNeutral50 lg:dark:bg-blinkNeutral800">
+      <nav
+        aria-label="Main Navigation"
+        className="h-auto lg:h-16 px-6 flex items-center justify-between absolute top-3 lg:top-0 right-0 lg:right-0 left-12 lg:left-0 lg:relative"
+      >
+        <div className="text-3xl blink-text-primary italic font-blink-title">
+          <a href="#">My Dashboards</a>
+        </div>
+        <div className="gap-3 hidden lg:flex">
+        ... // the rest of the code
+```
+
+As you can see, just a bunch of divs and links. However, all of this is still JavaScript, and exactly this code is included in all the JavaScript files that contribute to the "no interactivity" gap. But there is no interactivity here! The only thing from this component that we actually need is the divs, links, and other tags. The layout in its HTML form.
+
+The only reason this code is included in the JavaScript bundle is because React needs it to construct the Virtual DOM: a hierarchical representation of everything that is rendered on the page.
+
+Every time you "render" a component in React like this `<TopbarForSidebarContentLayout />`, you're creating an Element. Underneath this nice HTML-like syntax is just an object with a bunch of properties, one of which is "type". The "type" can be either a `string`, and then it represents a DOM element. Or a function - and in this case, React will call that function, extract the bunch of elements it returns, and merge them together into the unified tree.
+
+```json
+// TopbarForSidebarContentLayout elements
+{
+	"type": "div",
+	"props": {
+		"children": [
+			{
+				"type": "nav",
+				"props": {
+					"className": "...",
+					...
+				}
+			}
+		]
+	}
+}
+```
+
+In the current SSR implementation, whether it's Next.js pages or my custom hacky solution, the process of extracting this tree from the React components happens twice. The first time is when we do the pre-rendering on the server. And the second time, completely from scratch, when we initialize the client-side React.
+
+But what if we didn't have to? What if, when we first generated that tree on the server, we preserved it and sent it to the client? If React could just recreate the Virtual DOM tree from that object, we'd kill two birds with one stone:
+
+- We wouldn't have to send this component in the JavaScript bundle, thus reducing the size of JavaScript.
+- We wouldn't have to iteratively call all those functions and convert their return values into the tree, thus reducing the time it takes to compile and execute the JavaScript.
+
+How to send that data to the client? We already know how, we did it for the SSR-fetched data! By embedding it into a `<script>` tag and attaching it to `window`.
+
+```tsx
+// return this in the server response
+const htmlWithData = `
+	<script>window.__REACT_ELEMENTS__ = ${JSON.stringify({
+	  "type": "div",
+	  "props": { "children": [...] }
+	})}</script>
+	${HTMLString}`;
+```
+
+What we just invented as a theoretical possibility is **React Server Components**.
+
+If I migrate my project to the Next.js App Router, which is Server Components, I'll see this in the HTML served from the server:
+
+```tsx
+<script>self.__next_f.push([1,"6:[\"$\",\"div\",null,{\"className\":\"w-full h-full flex flex-col lg:flex-row\",\"children\":[\"$\",\"div\",null,{\"className\":\"flex flex-1 h-full overflow-y-auto flex..."
+</script>
+```
+
+This is a slightly modified but still recognizable tree of objects that explicitly represents what should be rendered on the page. If you have your own Next.js App Router project, peek into the Elements tab in Chrome at the very bottom. You'll see exactly the same picture in one of the `<script>` tags.
+
+This is why you can see even in the docs that [Server Components don't need a server](https://react.dev/reference/rsc/server-components#server-components-without-a-server). Because you don't! You can generate that structure during build time. It doesn't have to be a "live" server. It's called the RSC payload, by the way.
+
+In theory, this is all you need to know about Server Components. These are components that run in advance on the "server" side, and their code and all the libraries they use stay on the server side. Only the generated RSC payload, i.e., the weird structure above, is sent to the client.
+
+One of the advertised benefits you'll often see that goes together with Server Components is a reduction in bundle size. In theory, if all the code and all the libraries stay on the server, and only the final structure is sent to the client, the amount of JavaScript downloaded should noticeably decrease. And we already know the impact of too much JavaScript, so that sounds like a good idea.
+
+We'll measure how it performs in reality a bit later.
+
+### Async Components
+
+The second important concept that usually goes together with Server Components is Async Components. Their syntax is exactly what you'd expect: just your normal components, but async. This is totally valid code for data fetching now:
+
+```tsx
+const PrimarySidebar = async () => {
+  const sidebarResponse = await fetch("/api/sidebar");
+  const sidebarData = await sidebarResponse.json();
+
+  return <div>{sidebarData.map(...)}</div>
+};
+```
+
+It's supported only on the server. At least at the time of writing this article. During the rendering process, React will see the async components, wait for the promises to resolve, generate the RSC payload from the results, send it to where it is supposed to be in the RSC structure, and continue further.
+
+### Streaming
+
+[Streaming](https://developer.mozilla.org/en-US/docs/Web/API/Streams_API/Concepts) is the third most important concept that again usually goes together with Server Components. It implements exactly what was described as a theoretical exercise earlier.
+
+In the "normal" SSR implementation, the server will first generate all the HTML it's going to send as a string, and then send it as a big chunk to the client.
+
+With "streaming" SSR implementation, the server will first create a [Node.js Stream](https://nodejs.org/api/stream.html). Then, it will use [renderToPipeableStream](https://react.dev/reference/react-dom/server/renderToPipeableStream) React API to render the React app chunk by chunk into that Node stream.
+
+The chunk boundaries for this process are not React components or async components, by the way. It's components that are wrapped in [Suspense](https://react.dev/reference/react/Suspense). Remember that, it's crucial. We'll see the significance when we start measuring.
+
+The working implementation of this for a multi-page app like mine is insane. The docs don't cover it well. I spent an embarrassing number of hours trying to make it work, and the end result would've been multiple really complicated files and still half-broken. It's not a simple `renderToString` like it was with the "normal" SSR.
+
+So it's easier just to use a framework right away here. And [Next.js App Router](https://nextjs.org/docs/app) is basically a synonym for React Server Components and Streaming at the moment, although a few others have started supporting them as well recently. React Router recently released experimental support for Server Components, for example. But Next.js is still dominating the conversation here.
+
+## Measuring Next.js App Router After Lift-and-Shift Migration
+
+In order for the comparison with the existing measurements to be meaningful in Next.js App Router, I need to establish a baseline and isolate the effect of Streaming and Server Components somehow. Because the benefit and the curse of Next.js is that it does A LOT. An insane amount of various optimizations, caching, assumptions, transformations, etc.
+
+If I just rewrite my entire app right away, the comparison won't be fair, since there will be no way to distinguish whether the benefits (or degradations) come from the framework doing something unique, or Server Components/Streaming being awesome or terrible.
+
+However, if I imagine a possible migration process of an existing app from Next.js Pages, then I think it's possible to extract something meaningful.
+
+So let's be rational here. I have an existing large app implemented with Next.js Pages and client-side data fetching. This is the app with the smallest LCP so far, the second row in the table. I need to migrate it to the new framework with a completely new mental model and a completely new way to fetch data. What do I do?
+
+First, I need to lift-and-shift it as much as possible and make sure the app works and nothing is broken. In the context of this experiment, it means re-implementing routing a bit and using `use client` in every entry file. This will force the App Router into Client Components everywhere.
+
+As a result, it will isolate the effects of the new framework: every benefit or degradation here will be because of the framework itself, not because of Server Components or Streaming. There aren't any yet! As a side bonus, it will show whether it's worth migrating from the "old" Next.js to the "new" one without significant code changes.
+
+This way, the app will behave exactly as before, as it was with client-side data fetching, while being pre-rendered on Next.js Pages. Here are the measurements:
+
+<div className="scrollable-container">
+<table border="1" cellpadding="5" cellspacing="0">
+  <thead>
+  <tr>
+    <th></th>
+    <th>LCP (no cache/JS cache)</th>
+    <th>Sidebar (no cache/JS cache)</th>
+    <th>Messages (no cache/JS cache)</th>
+    <th>Toggle interactive (no cache/JS cache)</th>
+    <th>No interactivity gap</th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td>Client-Side Rendering</td>
+    <td>4.1s / 800ms</td>
+    <td>4.7s / 1.5s</td>
+    <td>5.1s / 2s</td>
+    <td>4.1s / 800ms</td>
+    <td></td>
+  </tr>
+  <tr>
+    <td>Server-Side Rendering (Client Data Fetching)</td>
+    <td>1.61s / 800ms</td>
+    <td>4.7s / 1.5s</td>
+    <td>5.1s / 2s</td>
+    <td>4s / 900ms</td>
+    <td>2.39s / 100ms</td>
+  </tr>
+  <tr>
+    <td>Server-Side Rendering (Server Data Fetching)</td>
+    <td>2.16s / 1.24s</td>
+    <td>2.16s / 1.24s</td>
+    <td>2.16s / 1.24s</td>
+    <td>4.6s / 1.4s</td>
+    <td>2.44s / 150ms</td>
+  </tr>
+  <tr className="secondary">
+    <td>Next.js Pages (Client Data fetching)</td>
+    <td>1.76s / 800ms</td>
+    <td>3.7s / 1.5s</td>
+    <td>4.2s / 2s</td>
+    <td>3.1s / 900ms</td>
+    <td>1.34s / 100ms</td>
+  </tr>
+  <tr>
+    <td>Next.js Pages (Server Data fetching)</td>
+    <td>2.15s / 1.15s</td>
+    <td>2.15s / 1.15s</td>
+    <td>2.15s / 1.15s</td>
+    <td>3.5s / 1.25s</td>
+    <td>1.35s / 100ms</td>
+  </tr>
+  <tr className="active">
+    <td>Next.js App router (Lift-and-shift)</td>
+    <td>1.28s / 650ms</td>
+    <td>4.4s / 1.5s</td>
+    <td>4.9s / 2s</td>
+    <td>3.8s / 900ms</td>
+    <td>2.52s / 250ms</td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+The LCP value here dropped to **1.28s**, the smallest value so far. Compared to Next.js Pages it's ~500ms improvement, which is huge! 🎉 However, everything else seems to have gotten worse by ~700ms, which is also huge, only in the negative direction 🥺.
+
+Investigating why this is the case can be a ton of fun and a good test of how well you can read the performance profile, so I highly encourage you to give it a try yourself 😉. If you're trying to replicate it and it doesn't happen for you, it might be browser-dependent. Make sure you use Chrome.
+
+The answer is this.
+
+First, Next.js App Router seems to delay all JavaScript until after the CSS is loaded. The Pages version didn't do that and was loading CSS and JavaScript in parallel. As a result, JavaScript loading "stole" a bit of bandwidth, and CSS was loading slower in Pages, thus delaying the LCP value. This accounts for the 500ms gained for the LCP. And in ~700ms loss in everything else. You can find it in the Network section.
+
+![](/assets/react-server-components-performance/pages-vs-app-router-profile.png)
+
+Plus, App Router seems to be very busy on the Main thread, at least ~100ms worth of tasks more than in Pages. Which delays everything else other than LCP even further. The final 100ms could be just random fluctuations here and there.
+
+In total, the effect I'd say is a bit meh. Maybe further refactoring will make it better.
+
+The next step here would be to migrate to Server Components as much as possible. The app uses state here and there, so not the entire thing can reasonably be Server Components. When I drop `use client` in strategic places (see reproduction steps), the effect was interesting.
+
+The JavaScript amount was reduced, all right. On some pages just a little bit (Home page by just 2%), some pages by a lot (Login page went to almost zero, from KB value to B). However, most of the shared chunks didn't change at all, and the performance impact on all the metrics that are important to me on the Inbox page was exactly **zero**.
+
+So Server Components by themselves, without rewritten data fetching, in my app didn't have any performance impact. And I suspect in most real-world messy apps, where `use client` is slapped randomly here and there without much overthinking and eventually bubbles up to the very root of most pages, it will be the same.
+
+**Steps to reproduce the experiment**:
+
+1. Start the backend API: `npm run start --workspace=backend-api`
+2. Go to `frontend/utils/link.tsx`, uncomment Next.js link and comment out the custom implementation
+3. Go to `src/frontend/next-app-router/src/app` folder and add `use client` at the top of every `page` file inside to force everything to be Client Components. Remove all `use client` to revert back to reasonable amount of Server Components (without data fetching so far).
+4. Build the frontend: `npm run build --workspace=next-app-router`
+5. Start the frontend: `npm run start --workspace=next-app-router`
+6. Start reverse proxy for HTTP2/3: `caddy reverse-proxy --to :3000`
+7. Open the website at https://localhost/inbox
+
+## Measuring Next.js App Router With React Server Components Data Fetching
+
+Next step in the migration would be to rewrite data fetching from Client to Server.
+
+Basically, instead of this:
+
+```tsx
+const Sidebar = () => {
+  useEffect(() => {
+    const fetchSidebarData = async () => {
+      const response = await fetch('/api/sidebar');
+      const data = await response.json();
+      setSidebarData(data);
+    };
+
+    fetchSidebarData();
+  }, []);
+};
+```
+
+I need to write this:
+
+```tsx
+const Sidebar = async () => {
+  const response = await fetch("/api/sidebar");
+  const data = await response.json();
+
+  return <div>{data.map(...)}</div>
+};
+```
+
+In reality it was a bit more complicated. I had to track down all the usages and make sure that every single component up the chain is Server Component, i.e., doesn't have `use client` at the top. Otherwise, this code causes infinite loops. So that required some creative thinking and a bit of refactoring.
+
+In the end, I was successful and ready to measure! Here are the numbers.
+
+<div className="scrollable-container">
+<table border="1" cellpadding="5" cellspacing="0">
+  <thead>
+  <tr>
+    <th></th>
+    <th>LCP (no cache/JS cache)</th>
+    <th>Sidebar (no cache/JS cache)</th>
+    <th>Messages (no cache/JS cache)</th>
+    <th>Toggle interactive (no cache/JS cache)</th>
+    <th>No interactivity gap</th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td>Client-Side Rendering</td>
+    <td>4.1s / 800ms</td>
+    <td>4.7s / 1.5s</td>
+    <td>5.1s / 2s</td>
+    <td>4.1s / 800ms</td>
+    <td></td>
+  </tr>
+  <tr>
+    <td>Server-Side Rendering (Client Data Fetching)</td>
+    <td>1.61s / 800ms</td>
+    <td>4.7s / 1.5s</td>
+    <td>5.1s / 2s</td>
+    <td>4s / 900ms</td>
+    <td>2.39s / 100ms</td>
+  </tr>
+  <tr>
+    <td>Server-Side Rendering (Server Data Fetching)</td>
+    <td>2.16s / 1.24s</td>
+    <td>2.16s / 1.24s</td>
+    <td>2.16s / 1.24s</td>
+    <td>4.6s / 1.4s</td>
+    <td>2.44s / 150ms</td>
+  </tr>
+  <tr>
+    <td>Next.js Pages (Client Data fetching)</td>
+    <td>1.76s / 800ms</td>
+    <td>3.7s / 1.5s</td>
+    <td>4.2s / 2s</td>
+    <td>3.1s / 900ms</td>
+    <td>1.34s / 100ms</td>
+  </tr>
+  <tr className="secondary">
+    <td>Next.js Pages (Server Data fetching)</td>
+    <td>2.15s / 1.15s</td>
+    <td>2.15s / 1.15s</td>
+    <td>2.15s / 1.15s</td>
+    <td>3.5s / 1.25s</td>
+    <td>1.35s / 100ms</td>
+  </tr>
+  <tr>
+    <td>Next.js App router (Lift-and-shift)</td>
+    <td>1.28s / 650ms</td>
+    <td>4.4s / 1.5s</td>
+    <td>4.9s / 2s</td>
+    <td>3.8s / 900ms</td>
+    <td>2.52s / 250ms</td>
+  </tr>
+  <tr className="active">
+    <td>Next.js App router (Server Fetching)</td>
+    <td>1.78s / 1.2s</td>
+    <td>1.78s / 1.2s</td>
+    <td>1.78s / 1.2s</td>
+    <td>4.2s / 1.3s</td>
+    <td>2.42s / 100ms</td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+The result is... interesting. Can you guess what happened here?
+
+As you can see, the LCP value, compared to the lift-and-shift version _worsen_ by ~500ms. And it aligned itself with the Sidebar and Messages numbers. In fact, this pattern repeats the pattern of Next.js Pages with Server Data fetching _precisely_. Only accounting for the lower LCP and higher no-interactivity gap because of the delayed JavaScript download.
+
+Remeber, in the Streaming section I mentioned that streaming chunks are guarded by [Suspense](https://react.dev/reference/react/Suspense) and that it's crucial to remember that? Well, this is the reason. If you forget to mark those streaming chunks with Suspense (or [loading.ts](https://nextjs.org/docs/app/api-reference/file-conventions/loading) in the case of Next.js), React will treat the entire app as one huge chunk.
+
+As a result, when rendering, React will just `await` every asynchronous component it encounters in the tree without any attempts to send them early to the client. And the app behaves exactly like Next.js Pages or my custom solution, where we waited to receive all the data before sending anything to the client.
+
+To fix this, we need to wrap our asynchronous Server Components in `<Suspense>`:
+
+```tsx
+// Somewhere in the render, same for the sidebar
+<Suspense fallback={<div>Loading inbox...</div>}>
+  <InboxWithFixedBundlePage messages={messages} />
+</Suspense>
+```
+
+Now it will behave as advertised. React will render everything on the "critical path" first, without waiting for the async components inside Suspense to be done with data fetching. This will be the first chunk. The server then will send this chunk to the client and keep the connection open while waiting for the _suspended_ components. I.e., chilling and waiting for promises to resolve. After the Sidebar data finishes, its Suspense boundary is resolved, another chunk is ready and fed to the client. Same with Messages.
+
+Measurements for the correct implementation look like this.
+
+<div className="scrollable-container">
+<table border="1" cellpadding="5" cellspacing="0">
+  <thead>
+  <tr>
+    <th></th>
+    <th>LCP (no cache/JS cache)</th>
+    <th>Sidebar (no cache/JS cache)</th>
+    <th>Messages (no cache/JS cache)</th>
+    <th>Toggle interactive (no cache/JS cache)</th>
+    <th>No interactivity gap</th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td>Client-Side Rendering</td>
+    <td>4.1s / 800ms</td>
+    <td>4.7s / 1.5s</td>
+    <td>5.1s / 2s</td>
+    <td>4.1s / 800ms</td>
+    <td></td>
+  </tr>
+  <tr>
+    <td>Server-Side Rendering (Client Data Fetching)</td>
+    <td>1.61s / 800ms</td>
+    <td>4.7s / 1.5s</td>
+    <td>5.1s / 2s</td>
+    <td>4s / 900ms</td>
+    <td>2.39s / 100ms</td>
+  </tr>
+  <tr>
+    <td>Server-Side Rendering (Server Data Fetching)</td>
+    <td>2.16s / 1.24s</td>
+    <td>2.16s / 1.24s</td>
+    <td>2.16s / 1.24s</td>
+    <td>4.6s / 1.4s</td>
+    <td>2.44s / 150ms</td>
+  </tr>
+  <tr className="secondary">
+    <td>Next.js Pages (Client Data fetching)</td>
+    <td>1.76s / 800ms</td>
+    <td>3.7s / 1.5s</td>
+    <td>4.2s / 2s</td>
+    <td>3.1s / 900ms</td>
+    <td>1.34s / 100ms</td>
+  </tr>
+  <tr>
+    <td>Next.js Pages (Server Data fetching)</td>
+    <td>2.15s / 1.15s</td>
+    <td>2.15s / 1.15s</td>
+    <td>2.15s / 1.15s</td>
+    <td>3.5s / 1.25s</td>
+    <td>1.35s / 100ms</td>
+  </tr>
+  <tr>
+    <td>Next.js App router (Lift-and-shift)</td>
+    <td>1.28s / 650ms</td>
+    <td>4.4s / 1.5s</td>
+    <td>4.9s / 2s</td>
+    <td>3.8s / 900ms</td>
+    <td>2.52s / 250ms</td>
+  </tr>
+  <tr>
+    <td>Next.js App router (Server Fetching with Forgotten Suspense)</td>
+    <td>1.78s / 1.2s</td>
+    <td>1.78s / 1.2s</td>
+    <td>1.78s / 1.2s</td>
+    <td>4.2s / 1.3s</td>
+    <td>2.42s / 100ms</td>
+  </tr>
+  <tr className="active">
+    <td>Next.js App router (Server Fetching with Suspense)</td>
+    <td>1.28s / 750ms</td>
+    <td>1.28s / 750ms</td>
+    <td>1.28s / 1.1s</td>
+    <td>3.8s / 800ms</td>
+    <td>2.52s / 50ms</td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+Okay, now that looks fancy and super fast! Except for the "no interactivity" gap, of course, that one remains the worst among everything.
+
+In fact, it's so fast that all the numbers merged together again. Something somewhere does some form of batching, I'd assume, and those three ended up in the same chunk.
+
+However, if I increase times for the `/api/sidebar` to 3 seconds and for `/api/messages` to 5 seconds, the picture of progressive rendering becomes visible. Although it will look exactly like Client-Side Rendering for the users, just faster.
+
+The performance profile, however, becomes hilarious:
+
+![](/assets/react-server-components-performance/server-components-performance-profile.png)
+
+See that loooooong HTML bar in the Network section? That's the server keeping the connection open while waiting for the data. Compare it with more "traditional" SSR:
+
+![](/assets/react-server-components-performance/traditional-ssr-performance-profile.png)
+
+HTML is done as soon as it's done, no waiting.
+
+**Steps to reproduce the experiment**:
+
+1. The same as the previous sections, plus:
+2. Go to `src/frontend/next-app-router/src/app/inbox/page.tsx` and comment/uncomment relevant imports and everything inside the render function, except for Suspense, for the "broken" streaming experience with server data fetching.
+3. Uncomment Suspense in the file above and in `src/frontend/next-app-router/components/primary-sidebar-rsc.tsx` to fix it.
+
+## TL; DR
+
+Okay, so what's the TL;DR of this <s>research paper</s> article? Here's the final table with all the measurements again:
+
+  <div className="scrollable-container">
+<table border="1" cellpadding="5" cellspacing="0">
+  <thead>
+  <tr>
+    <th></th>
+    <th>LCP (no cache/JS cache)</th>
+    <th>Sidebar (no cache/JS cache)</th>
+    <th>Messages (no cache/JS cache)</th>
+    <th>Toggle interactive (no cache/JS cache)</th>
+    <th>No interactivity gap</th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td>Client-Side Rendering</td>
+    <td>4.1s / 800ms</td>
+    <td>4.7s / 1.5s</td>
+    <td>5.1s / 2s</td>
+    <td>4.1s / 800ms</td>
+    <td></td>
+  </tr>
+  <tr>
+    <td>Server-Side Rendering (Client Data Fetching)</td>
+    <td>1.61s / 800ms</td>
+    <td>4.7s / 1.5s</td>
+    <td>5.1s / 2s</td>
+    <td>4s / 900ms</td>
+    <td>2.39s / 100ms</td>
+  </tr>
+  <tr>
+    <td>Server-Side Rendering (Server Data Fetching)</td>
+    <td>2.16s / 1.24s</td>
+    <td>2.16s / 1.24s</td>
+    <td>2.16s / 1.24s</td>
+    <td>4.6s / 1.4s</td>
+    <td>2.44s / 150ms</td>
+  </tr>
+  <tr className="secondary">
+    <td>Next.js Pages (Client Data fetching)</td>
+    <td>1.76s / 800ms</td>
+    <td>3.7s / 1.5s</td>
+    <td>4.2s / 2s</td>
+    <td>3.1s / 900ms</td>
+    <td>1.34s / 100ms</td>
+  </tr>
+  <tr>
+    <td>Next.js Pages (Server Data fetching)</td>
+    <td>2.15s / 1.15s</td>
+    <td>2.15s / 1.15s</td>
+    <td>2.15s / 1.15s</td>
+    <td>3.5s / 1.25s</td>
+    <td>1.35s / 100ms</td>
+  </tr>
+  <tr>
+    <td>Next.js App router (Lift-and-shift)</td>
+    <td>1.28s / 650ms</td>
+    <td>4.4s / 1.5s</td>
+    <td>4.9s / 2s</td>
+    <td>3.8s / 900ms</td>
+    <td>2.52s / 250ms</td>
+  </tr>
+  <tr>
+    <td>Next.js App router (Server Fetching with Forgotten Suspense)</td>
+    <td>1.78s / 1.2s</td>
+    <td>1.78s / 1.2s</td>
+    <td>1.78s / 1.2s</td>
+    <td>4.2s / 1.3s</td>
+    <td>2.42s / 100ms</td>
+  </tr>
+  <tr className="active">
+    <td>Next.js App router (Server Fetching with Suspense)</td>
+    <td>1.28s / 750ms</td>
+    <td>1.28s / 750ms</td>
+    <td>1.28s / 1.1s</td>
+    <td>3.8s / 800ms</td>
+    <td>2.52s / 50ms</td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+Client-side Rendering is the worst from the initial load point of view, as expected. However, the page becomes immediately interactive as soon as it appears. Plus, transitions between pages are the fastest here compared to any server-based transitions.
+
+Introducing Server-Side Rendering can drastically improve initial load numbers, but comes at the cost of a "no interactivity" gap. When the page is already visible, but nothing that is powered by JavaScript works. The size of the gap highly depends on the amount of JavaScript needed to initialize the page.
+
+Fetching data on the server will slow the Initial Load, but will also make the full-page experience visible much earlier.
+
+Migrating from "traditional" Server-Side Rendering to React Server Components with Streaming, namely from the Next.js Pages to Next.js App Router, can make performance _worse_ if you're not careful. You need to rewrite data fetching to be from the server, and don't forget Suspense boundaries to see any improvements. This is quite significant dev effort and could require a re-architecture of the entire app.
+
+Migrating from Next.js Pages to Next.js App Router can make the "no interactivity" gap worse because of the delayed JavaScript download. It might be browser-dependent, though.
+
+Server Components alone don't improve performance if the app is a mix of Client and Server components. They don't reduce the bundle size enough to have any measureable performance impact. Streaming and Suspense are what matter. The main performance benefit comes from completely rewriting data fetching to be Server Components-first.
+
+By the way, the Engineering team at Preply came to exactly the same conclusion while trying to improve their INP. If you like reading performance investigations and case studies, I highly recommend this article by [Stefano Magni](https://www.linkedin.com/in/noriste/): [How Preply improved INP on a Next.js application (without React Server Components and App Router)](https://medium.com/preply-engineering/how-preply-improved-inp-on-a-next-js-application-without-react-server-components-and-app-router-491713149875)

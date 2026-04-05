@@ -191,6 +191,9 @@ export function logResponse(
   console.log(`  ${cyan("Provider")}         ${response.provider}`);
   console.log(`  ${cyan("Model")}            ${response.model}`);
   console.log(`  ${cyan("Stop reason")}      ${response.stop_reason}`);
+  if (response.tool_calls_made != null) {
+    console.log(`  ${cyan("Tool calls")}       ${response.tool_calls_made}`);
+  }
   console.log(`  ${cyan("Duration")}         ${durationMs.toFixed(0)}ms`);
   const tokPerSec =
     durationMs > 0

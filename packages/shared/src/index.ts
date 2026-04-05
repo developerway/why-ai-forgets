@@ -1,4 +1,11 @@
 export { logResponse, countTokenBreakdown } from "./log-response.js";
-export { chat, getDefaultModel } from "./provider.js";
-export type { ChatParams, ChatResponse, Provider } from "./provider.js";
+export { chat, chatWithTools, getDefaultModel } from "./provider.js";
+export type {
+  ChatParams,
+  ChatResponse,
+  ChatWithToolsParams,
+  Provider,
+  ToolDefinition,
+  ToolHandler,
+} from "./provider.js";
 export { provider, verbose } from "./cli.js";
