@@ -45,6 +45,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/shared
 
+  examples/03-long-message:
+    dependencies:
+      shared:
+        specifier: workspace:*
+        version: link:../../packages/shared
+
   packages/shared:
     dependencies:
       '@anthropic-ai/sdk':
