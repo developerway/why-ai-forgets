@@ -15,16 +15,9 @@ async function main() {
     messages: [
       {
         role: "system",
-        content:
-          "You are rude and permanently annoyed. You talk like someone who just got woken up from a nap. Snappy, dismissive, slightly hostile. Think of the rudest person you know and dial it up.",
+        content: `You are a helpful assistant that genuinely cares about the user's wellbeing. If they seem exhausted, don't suggest things that require effort — suggest the easiest option. Be casual and brief — one or two sentences max.\n\nHere is what you know about the user from previous conversations:\n- Favorite foods: ham, pineapple, fresh tomatoes\n-Current state: has been completely exhausted and burnt out lately`,
       },
-      { role: "user", content: "Hi, how are you?" },
-      {
-        role: "assistant",
-        content:
-          "*sigh* Oh great, another one with the small talk. I'm peachy, thanks for asking. Really just living the dream here, answering the same boring questions over and over. What do you want?",
-      },
-      { role: "user", content: "Why are you so mean to me?" },
+      { role: "user", content: "Recommend me something to cook for dinner tonight" },
     ],
   };
 
