@@ -354,13 +354,50 @@ async function phase2(): Promise<void> {
   });
 }
 
-async function main() {
-  await phase2();
+function parsePhaseArg(): "1" | "2" | null {
+  const arg = process.argv.find((a) => a.startsWith("--phase="));
+  if (!arg) return null;
+  const value = arg.slice("--phase=".length);
+  return value === "1" || value === "2" ? value : null;
+}
 
-  // Phase 1 is independent — uncomment this and comment the phase2() call
-  // above to watch Claude actually decide which articles to read:
-  //
-  // await phase1();
+function printUsage() {
+  console.log(bold("\nExample 04: tool use + adaptive thinking\n"));
+  console.log(
+    `  ${cyan("Phase 1")}  — live: Claude sees an article index and a read_article`,
+  );
+  console.log(
+    `            tool, decides which articles are relevant, and loads them.`,
+  );
+  console.log(
+    `            Shows the model's reasoning + tool-selection behavior.\n`,
+  );
+  console.log(
+    `  ${cyan("Phase 2")}  — pre-canned: the read_article round-trip is hardcoded,`,
+  );
+  console.log(
+    `            then Claude reasons over the loaded articles and calls`,
+  );
+  console.log(
+    `            deepAnalysis to re-validate benchmark numbers.`,
+  );
+  console.log(
+    `            Shows thinking → tool_use → tool_result → thinking interleaving.\n`,
+  );
+  console.log(yellow(`  Run one of:`));
+  console.log(`    ${dim("pnpm --filter 04-tools start -- --phase=1")}`);
+  console.log(`    ${dim("pnpm --filter 04-tools start -- --phase=2")}\n`);
+}
+
+async function main() {
+  const phase = parsePhaseArg();
+  if (phase === "1") {
+    await phase1();
+  } else if (phase === "2") {
+    await phase2();
+  } else {
+    printUsage();
+  }
 }
 
 main().catch(console.error);
