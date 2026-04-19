@@ -53,6 +53,9 @@ importers:
 
   examples/04-tools:
     dependencies:
+      '@anthropic-ai/sdk':
+        specifier: ^0.82.0
+        version: 0.82.0
       shared:
         specifier: workspace:*
         version: link:../../packages/shared
